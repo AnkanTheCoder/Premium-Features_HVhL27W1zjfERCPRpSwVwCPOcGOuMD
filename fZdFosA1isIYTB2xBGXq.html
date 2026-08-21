@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Local File Vault</title>
+    <title>Local File Vault (50 MB)</title>
     <!-- FontAwesome Icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
@@ -557,7 +557,6 @@
             to { transform: translateX(0); opacity: 1; }
         }
 
-        /* Responsive Adjustments */
         @media (max-width: 640px) {
             .header-container {
                 flex-direction: column;
@@ -591,13 +590,13 @@
                 <div class="logo-icon"><i class="fa-solid fa-vault"></i></div>
                 <div class="logo-title">
                     <h1>Local File Vault</h1>
-                    <span class="badge-local">Browser Storage Only</span>
+                    <span class="badge-local">IndexedDB Storage</span>
                 </div>
             </div>
             <div class="storage-widget">
                 <div class="storage-text">
-                    <span>LocalStorage Used</span>
-                    <span id="storageText">0 B / 5 MB</span>
+                    <span>IndexedDB Used</span>
+                    <span id="storageText">0 B / 50 MB</span>
                 </div>
                 <div class="progress-bar">
                     <div class="progress-fill" id="storageProgress"></div>
@@ -613,7 +612,7 @@
             <div class="dropzone-content">
                 <i class="fa-solid fa-cloud-arrow-up dropzone-icon"></i>
                 <h3>Drag & Drop files here, or browse</h3>
-                <p style="font-size: 0.85rem; color: var(--text-muted);">Supports Images, PDFs, Documents, ZIPs & Text files</p>
+                <p style="font-size: 0.85rem; color: var(--text-muted);">Supports Images, PDFs, Documents, ZIPs & Text files (Up to 50 MB limit)</p>
                 <button class="btn-upload" type="button">Choose Files</button>
             </div>
         </section>
@@ -663,9 +662,7 @@
                 <button class="modal-close" id="btnCloseDetails">&times;</button>
             </div>
             <div class="modal-body">
-                <div class="details-list" id="modalDetailsContent">
-                    <!-- Dynamic details content -->
-                </div>
+                <div class="details-list" id="modalDetailsContent"></div>
             </div>
             <div class="modal-footer">
                 <button class="btn btn-secondary" id="btnModalClose">Close</button>
@@ -689,57 +686,93 @@
         </div>
     </div>
 
-    <!-- Toasts container -->
+    <!-- Toast Container -->
     <div class="toast-container" id="toastContainer"></div>
 
     <script>
         /**
-         * Storage Provider Architecture
-         * Decoupled to allow easy replacement of localStorage with IndexedDB in future updates.
+         * IndexedDB Storage Engine (Supports 50 MB limit)
          */
-        class StorageProvider {
-            constructor(storageKey = 'local_file_vault_data') {
-                this.STORAGE_KEY = storageKey;
+        class IndexedDBStorage {
+            constructor(dbName = 'FileVaultDB', storeName = 'files') {
+                this.dbName = dbName;
+                this.storeName = storeName;
+                this.db = null;
             }
 
-            getFiles() {
-                try {
-                    const data = localStorage.getItem(this.STORAGE_KEY);
-                    return data ? JSON.parse(data) : [];
-                } catch (e) {
-                    console.error("Failed to read from localStorage", e);
-                    return [];
-                }
+            async init() {
+                if (this.db) return this.db;
+                return new Promise((resolve, reject) => {
+                    const request = indexedDB.open(this.dbName, 1);
+                    request.onupgradeneeded = (event) => {
+                        const db = event.target.result;
+                        if (!db.objectStoreNames.contains(this.storeName)) {
+                            db.createObjectStore(this.storeName, { keyPath: 'id' });
+                        }
+                    };
+                    request.onsuccess = (event) => {
+                        this.db = event.target.result;
+                        resolve(this.db);
+                    };
+                    request.onerror = (event) => reject(event.target.error);
+                });
             }
 
-            saveFiles(files) {
-                try {
-                    localStorage.setItem(this.STORAGE_KEY, JSON.stringify(files));
-                    return true;
-                } catch (e) {
-                    if (e.name === 'QuotaExceededError' || e.code === 22) {
-                        throw new Error('Browser localStorage quota exceeded. Please remove some files to free up space.');
-                    }
-                    throw e;
-                }
+            async getFiles() {
+                await this.init();
+                return new Promise((resolve, reject) => {
+                    const tx = this.db.transaction(this.storeName, 'readonly');
+                    const store = tx.objectStore(this.storeName);
+                    const request = store.getAll();
+                    request.onsuccess = () => resolve(request.result || []);
+                    request.onerror = () => reject(request.error);
+                });
             }
 
-            getBytesUsed() {
-                const data = localStorage.getItem(this.STORAGE_KEY);
-                return data ? new Blob([data]).size : 0;
+            async saveFile(fileObj) {
+                await this.init();
+                return new Promise((resolve, reject) => {
+                    const tx = this.db.transaction(this.storeName, 'readwrite');
+                    const store = tx.objectStore(this.storeName);
+                    const request = store.put(fileObj);
+                    request.onsuccess = () => resolve(true);
+                    request.onerror = () => reject(request.error);
+                });
+            }
+
+            async deleteFile(id) {
+                await this.init();
+                return new Promise((resolve, reject) => {
+                    const tx = this.db.transaction(this.storeName, 'readwrite');
+                    const store = tx.objectStore(this.storeName);
+                    const request = store.delete(id);
+                    request.onsuccess = () => resolve(true);
+                    request.onerror = () => reject(request.error);
+                });
+            }
+
+            async clearAll() {
+                await this.init();
+                return new Promise((resolve, reject) => {
+                    const tx = this.db.transaction(this.storeName, 'readwrite');
+                    const store = tx.objectStore(this.storeName);
+                    const request = store.clear();
+                    request.onsuccess = () => resolve(true);
+                    request.onerror = () => reject(request.error);
+                });
             }
         }
 
         /**
-         * Main Application Controller
+         * Application Controller
          */
         class App {
             constructor() {
-                this.storage = new StorageProvider();
+                this.storage = new IndexedDBStorage();
                 this.files = [];
                 this.selectedIds = new Set();
                 this.pendingConfirmAction = null;
-                this.ESTIMATED_MAX_BYTES = 5 * 1024 * 1024; // ~5MB Standard localStorage limit
+                this.MAX_BYTES = 50 * 1024 * 1024; // 50 MB target capacity limit
 
                 this.initElements();
                 this.initEventListeners();
@@ -760,13 +793,11 @@
                 this.storageProgress = document.getElementById('storageProgress');
                 this.toastContainer = document.getElementById('toastContainer');
                 
-                // Modals
                 this.detailsModal = document.getElementById('detailsModal');
                 this.confirmModal = document.getElementById('confirmModal');
             }
 
             initEventListeners() {
-                // File Selection & Drag Drop
                 this.dropzone.addEventListener('dragover', (e) => {
                     e.preventDefault();
                     this.dropzone.classList.add('dragover');
@@ -787,15 +818,13 @@
                 this.fileInput.addEventListener('change', (e) => {
                     if (e.target.files.length) {
                         this.handleFilesUpload(e.target.files);
-                        this.fileInput.value = ''; // Reset input
+                        this.fileInput.value = '';
                     }
                 });
 
-                // Filtering & Search
                 this.searchInput.addEventListener('input', () => this.renderGrid());
                 this.sortSelect.addEventListener('change', () => this.renderGrid());
 
-                // Bulk Actions
                 this.selectAllCheckbox.addEventListener('change', (e) => {
                     const visibleFiles = this.getFilteredAndSortedFiles();
                     if (e.target.checked) {
@@ -825,7 +854,6 @@
                     );
                 });
 
-                // Modal Close Event Listeners
                 document.getElementById('btnCloseDetails').addEventListener('click', () => this.closeModal(this.detailsModal));
                 document.getElementById('btnModalClose').addEventListener('click', () => this.closeModal(this.detailsModal));
                 document.getElementById('btnConfirmCancel').addEventListener('click', () => this.closeModal(this.confirmModal));
@@ -838,8 +866,14 @@
             async handleFilesUpload(fileList) {
                 const filesArray = Array.from(fileList);
                 let addedCount = 0;
+                let currentBytesUsed = this.getTotalBytes();
 
                 for (const file of filesArray) {
+                    if (currentBytesUsed + file.size > this.MAX_BYTES) {
+                        this.showToast(`Cannot upload "${file.name}". Exceeds 50 MB limit!`, 'error');
+                        continue;
+                    }
+
                     try {
                         const base64Data = await this.fileToBase64(file);
                         const newFile = {
@@ -851,20 +885,17 @@
                             data: base64Data
                         };
 
-                        this.files.push(newFile);
-                        this.storage.saveFiles(this.files);
+                        await this.storage.saveFile(newFile);
+                        currentBytesUsed += file.size;
                         addedCount++;
                     } catch (err) {
-                        this.showToast(err.message || `Failed to upload ${file.name}`, 'error');
-                        // Rollback state from storage in case saving failed partway
-                        this.files = this.storage.getFiles();
-                        break;
+                        this.showToast(`Error storing ${file.name}`, 'error');
                     }
                 }
 
                 if (addedCount > 0) {
                     this.showToast(`Successfully uploaded ${addedCount} file(s).`);
-                    this.loadAndRender();
+                    await this.loadAndRender();
                 }
             }
 
@@ -877,17 +908,21 @@
                 });
             }
 
-            loadAndRender() {
-                this.files = this.storage.getFiles();
+            async loadAndRender() {
+                this.files = await this.storage.getFiles();
                 this.updateStorageWidget();
                 this.renderGrid();
             }
 
+            getTotalBytes() {
+                return this.files.reduce((total, file) => total + (file.size || 0), 0);
+            }
+
             updateStorageWidget() {
-                const bytesUsed = this.storage.getBytesUsed();
+                const bytesUsed = this.getTotalBytes();
                 const formattedUsed = this.formatBytes(bytesUsed);
-                const formattedMax = this.formatBytes(this.ESTIMATED_MAX_BYTES);
-                const percent = Math.min(100, Math.round((bytesUsed / this.ESTIMATED_MAX_BYTES) * 100));
+                const formattedMax = this.formatBytes(this.MAX_BYTES);
+                const percent = Math.min(100, Math.round((bytesUsed / this.MAX_BYTES) * 100));
 
                 this.storageText.textContent = `${formattedUsed} / ${formattedMax}`;
                 this.storageProgress.style.width = `${percent}%`;
@@ -966,7 +1001,6 @@
                         </div>
                     `;
 
-                    // Attach Event Listeners to Card Items
                     card.querySelector('.card-select').addEventListener('change', (e) => {
                         if (e.target.checked) {
                             this.selectedIds.add(file.id);
@@ -1036,29 +1070,29 @@
                 this.showToast(`Download started: ${file.name}`);
             }
 
-            deleteSingleFile(id) {
-                this.files = this.files.filter(f => f.id !== id);
+            async deleteSingleFile(id) {
+                await this.storage.deleteFile(id);
                 this.selectedIds.delete(id);
-                this.storage.saveFiles(this.files);
                 this.showToast('File deleted.');
-                this.loadAndRender();
+                await this.loadAndRender();
             }
 
-            deleteSelectedFiles() {
-                this.files = this.files.filter(f => !this.selectedIds.has(f.id));
+            async deleteSelectedFiles() {
+                const idsToDelete = Array.from(this.selectedIds);
+                for (const id of idsToDelete) {
+                    await this.storage.deleteFile(id);
+                }
                 const count = this.selectedIds.size;
                 this.selectedIds.clear();
-                this.storage.saveFiles(this.files);
                 this.showToast(`Deleted ${count} file(s).`);
-                this.loadAndRender();
+                await this.loadAndRender();
             }
 
-            deleteAllFiles() {
-                this.files = [];
+            async deleteAllFiles() {
+                await this.storage.clearAll();
                 this.selectedIds.clear();
-                this.storage.saveFiles(this.files);
                 this.showToast('All files cleared.');
-                this.loadAndRender();
+                await this.loadAndRender();
             }
 
             showFileDetails(file) {
@@ -1126,7 +1160,6 @@
             }
         }
 
-        // Initialize App when DOM is ready
         document.addEventListener('DOMContentLoaded', () => {
             window.app = new App();
         });
