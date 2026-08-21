@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Local File Vault (50 MB)</title>
+    <title>Local File Vault (500 MB)</title>
     <!-- FontAwesome Icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
@@ -102,7 +102,7 @@
             display: flex;
             flex-direction: column;
             gap: 0.35rem;
-            width: 220px;
+            width: 240px;
         }
 
         .storage-text {
@@ -590,13 +590,13 @@
                 <div class="logo-icon"><i class="fa-solid fa-vault"></i></div>
                 <div class="logo-title">
                     <h1>Local File Vault</h1>
-                    <span class="badge-local">IndexedDB Storage</span>
+                    <span class="badge-local">IndexedDB (High Capacity)</span>
                 </div>
             </div>
             <div class="storage-widget">
                 <div class="storage-text">
-                    <span>IndexedDB Used</span>
-                    <span id="storageText">0 B / 50 MB</span>
+                    <span>Storage Used</span>
+                    <span id="storageText">0 B / 500 MB</span>
                 </div>
                 <div class="progress-bar">
                     <div class="progress-fill" id="storageProgress"></div>
@@ -612,7 +612,7 @@
             <div class="dropzone-content">
                 <i class="fa-solid fa-cloud-arrow-up dropzone-icon"></i>
                 <h3>Drag & Drop files here, or browse</h3>
-                <p style="font-size: 0.85rem; color: var(--text-muted);">Supports Images, PDFs, Documents, ZIPs & Text files (Up to 50 MB limit)</p>
+                <p style="font-size: 0.85rem; color: var(--text-muted);">Supports Images, PDFs, Documents, ZIPs & Text files (Up to 500 MB limit)</p>
                 <button class="btn-upload" type="button">Choose Files</button>
             </div>
         </section>
@@ -691,10 +691,10 @@
 
     <script>
         /**
-         * IndexedDB Storage Engine (Supports 50 MB limit)
+         * IndexedDB Binary Blob Storage Engine (Scales up to 500 MB+)
          */
-        class IndexedDBStorage {
-            constructor(dbName = 'FileVaultDB', storeName = 'files') {
+        class BlobStorageEngine {
+            constructor(dbName = 'FileVaultDB_500MB', storeName = 'files') {
                 this.dbName = dbName;
                 this.storeName = storeName;
                 this.db = null;
@@ -729,12 +729,12 @@
                 });
             }
 
-            async saveFile(fileObj) {
+            async saveFile(fileRecord) {
                 await this.init();
                 return new Promise((resolve, reject) => {
                     const tx = this.db.transaction(this.storeName, 'readwrite');
                     const store = tx.objectStore(this.storeName);
-                    const request = store.put(fileObj);
+                    const request = store.put(fileRecord);
                     request.onsuccess = () => resolve(true);
                     request.onerror = () => reject(request.error);
                 });
@@ -768,11 +768,12 @@
          */
         class App {
             constructor() {
-                this.storage = new IndexedDBStorage();
+                this.storage = new BlobStorageEngine();
                 this.files = [];
                 this.selectedIds = new Set();
+                this.objectUrls = new Map(); // Store temporary memory object URLs for previews/downloads
                 this.pendingConfirmAction = null;
-                this.MAX_BYTES = 50 * 1024 * 1024; // 50 MB target capacity limit
+                this.MAX_BYTES = 500 * 1024 * 1024; // 500 MB limit
 
                 this.initElements();
                 this.initEventListeners();
@@ -870,22 +871,21 @@
 
                 for (const file of filesArray) {
                     if (currentBytesUsed + file.size > this.MAX_BYTES) {
-                        this.showToast(`Cannot upload "${file.name}". Exceeds 50 MB limit!`, 'error');
+                        this.showToast(`Cannot upload "${file.name}". Exceeds 500 MB storage capacity!`, 'error');
                         continue;
                     }
 
                     try {
-                        const base64Data = await this.fileToBase64(file);
-                        const newFile = {
+                        const fileRecord = {
                             id: 'file_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
                             name: file.name,
                             type: file.type || 'application/octet-stream',
                             size: file.size,
                             lastModified: file.lastModified || Date.now(),
-                            data: base64Data
+                            blob: file // Storing native File/Blob object
                         };
 
-                        await this.storage.saveFile(newFile);
+                        await this.storage.saveFile(fileRecord);
                         currentBytesUsed += file.size;
                         addedCount++;
                     } catch (err) {
@@ -899,19 +899,25 @@
                 }
             }
 
-            fileToBase64(file) {
-                return new Promise((resolve, reject) => {
-                    const reader = new FileReader();
-                    reader.readAsDataURL(file);
-                    reader.onload = () => resolve(reader.result);
-                    reader.onerror = error => reject(error);
-                });
-            }
-
             async loadAndRender() {
+                // Revoke old object URLs to avoid memory leaks
+                this.clearObjectUrls();
                 this.files = await this.storage.getFiles();
+                
+                // Pre-create Object URLs for fast rendering
+                this.files.forEach(f => {
+                    if (f.blob) {
+                        this.objectUrls.set(f.id, URL.createObjectURL(f.blob));
+                    }
+                });
+
                 this.updateStorageWidget();
                 this.renderGrid();
+            }
+
+            clearObjectUrls() {
+                this.objectUrls.forEach(url => URL.revokeObjectURL(url));
+                this.objectUrls.clear();
             }
 
             getTotalBytes() {
@@ -1028,8 +1034,9 @@
             }
 
             renderPreviewElement(file) {
-                if (file.type.startsWith('image/')) {
-                    return `<img src="${file.data}" alt="${file.name}">`;
+                const objectUrl = this.objectUrls.get(file.id);
+                if (file.type.startsWith('image/') && objectUrl) {
+                    return `<img src="${objectUrl}" alt="${file.name}">`;
                 }
                 
                 let iconClass = 'fa-file';
@@ -1061,8 +1068,11 @@
             }
 
             downloadFile(file) {
+                const objectUrl = this.objectUrls.get(file.id);
+                if (!objectUrl) return;
+
                 const a = document.createElement('a');
-                a.href = file.data;
+                a.href = objectUrl;
                 a.download = file.name;
                 document.body.appendChild(a);
                 a.click();
